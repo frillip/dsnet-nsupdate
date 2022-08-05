@@ -1,0 +1,1026 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import socket
+import json
+import logging
+from time import sleep
+from distutils.util import strtobool
+import yaml
+import colorlog
+import dns.update
+import dns.query
+import dns.tsigkeyring
+import dns.resolver
+import dns.reversename
+import dns.rdata
+import dns.rdatatype
+from pprint import pformat
+
+
+# Only log warnings
+log_level = logging.INFO
+
+# Logger format
+log_format = colorlog.ColoredFormatter(
+        "%(asctime)s %(log_color)s[%(levelname)s]%(reset)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+            }
+        )
+
+# Set up the fancy colour logging
+handler = colorlog.StreamHandler()
+handler.setFormatter(log_format)
+logger = colorlog.getLogger('dsnsupdate')
+logger.addHandler(handler)
+logger.setLevel(log_level)
+
+
+# Config file
+config = None
+
+class ConfigFile:
+    def __init__(self, source):
+        self.source = source
+        if self.source == "CONFIG_FILE_ARG":
+            self.file = sys.argv[1]
+
+        elif self.source == "CONFIG_FILE":
+            self.file = os.environ.get('DSNET_NSUPDATE_CONFIG_FILE', 'config.yaml')
+
+        else:
+            logger.info('Loading config from environment')
+            self.file = os.environ.get('DSNET_NSUPDATE_CONFIG_FILE', None)
+
+        self.report = self.Report()
+        self.dns = self.Dns()
+        self.log = self.Log()
+
+        if self.file:
+            logger.info('Loading config from file: ' + self.file)
+            if os.path.exists(self.file):
+                with open(self.file, 'r') as file:
+                    logger.debug('Opened '+self.file)
+                    self.loaded_yaml = yaml.safe_load(file)
+            else:
+                logger.error("Error loading config: \'" + self.file + "\' not found")
+                sys.exit(1)
+
+        
+            if self.loaded_yaml['dsnet-nsupdate'].get("report") is not None:
+                if self.loaded_yaml['dsnet-nsupdate']['report'].get("file") is not None:
+                    self.report.file = self.loaded_yaml['dsnet-nsupdate']['report']['file']
+
+            if self.loaded_yaml['dsnet-nsupdate']['dns'].get("internal") is not None:
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("enabled") is not None:
+                    self.dns.internal.enabled = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['enabled']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("nameserver") is not None:
+                    self.dns.internal.nameserver = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['nameserver']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("zone") is not None:
+                    self.dns.internal.zone = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['zone']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("ttl") is not None:
+                    self.dns.internal.ttl = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['ttl']
+
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("reverse4") is not None:
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4'].get("enabled") is not None:
+                        self.dns.internal.reverse4.enabled = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4']['enabled']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4'].get("nameserver") is not None:
+                        self.dns.internal.reverse4.nameserver = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4']['nameserver']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4'].get("zone") is not None:
+                        self.dns.internal.reverse4.zone = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4']['zone']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4'].get("ttl") is not None:
+                        self.dns.internal.reverse4.ttl = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse4']['ttl']
+                    if not self.dns.internal.reverse4.ttl:
+                        self.dns.internal.reverse4.ttl = self.dns.internal.ttl
+        
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['internal'].get("reverse6") is not None:
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6'].get("enabled") is not None:
+                        self.dns.internal.reverse6.enabled = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6']['enabled']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6'].get("nameserver") is not None:
+                        self.dns.internal.reverse6.nameserver = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6']['nameserver']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6'].get("zone") is not None:
+                        self.dns.internal.reverse6.zone = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6']['zone']
+                    if self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6'].get("ttl") is not None:
+                        self.dns.internal.reverse6.ttl = self.loaded_yaml['dsnet-nsupdate']['dns']['internal']['reverse6']['ttl']
+                    if not self.dns.internal.reverse6.ttl:
+                        self.dns.internal.reverse6.ttl = self.dns.internal.ttl
+        
+            if self.loaded_yaml['dsnet-nsupdate']['dns'].get("external") is not None:
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['external'].get("enabled") is not None:
+                    self.dns.external.enabled = self.loaded_yaml['dsnet-nsupdate']['dns']['external']['enabled']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['external'].get("nameserver") is not None:
+                    self.dns.external.nameserver = self.loaded_yaml['dsnet-nsupdate']['dns']['external']['nameserver']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['external'].get("zone") is not None:
+                    self.dns.external.zone = self.loaded_yaml['dsnet-nsupdate']['dns']['external']['zone']
+                if self.loaded_yaml['dsnet-nsupdate']['dns']['external'].get("ttl") is not None:
+                    self.dns.external.ttl = self.loaded_yaml['dsnet-nsupdate']['dns']['external']['ttl']
+
+            if self.loaded_yaml['dsnet-nsupdate']['dns'].get("current_peers_record") is not None:
+                self.dns.current_peers_record = self.loaded_yaml['dsnet-nsupdate']['dns']['current_peers_record']
+
+            self.dns.tsig_key_name = self.loaded_yaml['dsnet-nsupdate']['dns']['tsig_key_name']
+            self.dns.tsig_key_secret = self.loaded_yaml['dsnet-nsupdate']['dns']['tsig_key_secret']
+            self.dns.tsig_key_algorithm = self.loaded_yaml['dsnet-nsupdate']['dns']['tsig_key_algorithm']
+
+
+            if self.loaded_yaml['dsnet-nsupdate'].get("log") is not None:
+                if self.loaded_yaml['dsnet-nsupdate']['log'].get("level") is not None:
+                    self.log.level = self.loaded_yaml['dsnet-nsupdate']['log']['level']
+
+
+    class Report:
+        def __init__(self):
+            self.file = '/var/lib/dsnetreport.json'
+
+    class Dns:
+        def __init__(self):
+            self.internal = self.Zone()
+            self.internal.reverse4 = self.Zone()
+            self.internal.reverse4.nameserver = None
+            self.internal.reverse4.ttl = None
+            self.internal.reverse6 = self.Zone()
+            self.internal.reverse6.nameserver = None
+            self.internal.reverse6.ttl = None
+            self.external = self.Zone()
+
+            self.current_peers_record = "_dsnet_peers"
+            self.current_peers_record_zone = None
+            self.current_peers_record_fqdn = None
+            self.current_peers_record_ttl = None
+            self.current_peers_resolver = None
+
+            self.tsig_key_name = None
+            self.tsig_key_secret = None
+            self.tsig_key_algorithm = None
+
+        class Zone:
+            def __init__(self):
+                self.enabled = False
+                self.nameserver = "json"
+                self.resolver = dns.resolver.Resolver(configure=False)
+                self.zone = "json"
+                self.ttl = 300
+
+    class Log:
+        def __init__(self):
+            self.level = "INFO"
+
+
+def build_conf(config_source):
+    config = ConfigFile(config_source)
+
+    # Update config from environment variables if present
+    config.dns.internal.enabled = bool(strtobool(os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_ENABLED'))) if os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_ENABLED') else config.dns.internal.enabled
+    config.dns.internal.nameserver = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_NAMESERVER', config.dns.internal.nameserver)
+    config.dns.internal.zone = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_ZONE', config.dns.internal.zone)
+    config.dns.internal.ttl = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_TTL', config.dns.internal.ttl)
+
+    config.dns.internal.reverse4.enabled = bool(strtobool(os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE4_ENABLED'))) if os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE4_ENABLED') else config.dns.internal.reverse4.enabled
+    config.dns.internal.reverse4.nameserver = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE4_NAMESERVER', config.dns.internal.reverse4.nameserver)
+    config.dns.internal.reverse4.zone = os.environ.get('DSNET_NSUPDATE_DNS_RINTERNAL_EVERSE4_ZONE', config.dns.internal.reverse4.zone)
+    config.dns.internal.reverse4.ttl = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE4_TTL', config.dns.internal.reverse4.ttl)
+    
+    config.dns.internal.reverse6.enabled = bool(strtobool(os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE6_ENABLED'))) if os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE6_ENABLED') else config.dns.internal.reverse6.enabled
+    config.dns.internal.reverse6.nameserver = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE6_NAMESERVER', config.dns.internal.reverse6.nameserver)
+    config.dns.internal.reverse6.zone = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE6_ZONE', config.dns.internal.reverse6.zone)
+    config.dns.internal.reverse6.ttl = os.environ.get('DSNET_NSUPDATE_DNS_INTERNAL_REVERSE6_TTL', config.dns.internal.reverse6.ttl)
+
+    config.dns.external.enabled = bool(strtobool(os.environ.get('DSNET_NSUPDATE_DNS_EXTERNAL_ENABLED'))) if os.environ.get('DSNET_NSUPDATE_DNS_EXTERNAL_ENABLED') else config.dns.external.enabled
+    config.dns.external.nameserver = os.environ.get('DSNET_NSUPDATE_DNS_EXTERNAL_NAMESERVER', config.dns.external.nameserver)
+    config.dns.external.zone = os.environ.get('DSNET_NSUPDATE_DNS_EXTERNAL_ZONE', config.dns.external.zone)
+    config.dns.external.ttl = os.environ.get('DSNET_NSUPDATE_DNS_EXTERNAL_TTL', config.dns.external.ttl)
+
+    config.dns.current_peers_record = os.environ.get('DSNET_NSUPDATE_DNS_CURRENT_PEERS_RECORD', config.dns.current_peers_record)
+    config.dns.tsig_key_name = os.environ.get('DSNET_NSUPDATE_DNS_TSIG_KEY_NAME', config.dns.tsig_key_name)
+    config.dns.tsig_key_secret = os.environ.get('DSNET_NSUPDATE_DNS_TSIG_KEY_SECRET', config.dns.tsig_key_secret)
+
+
+    config.dns.tsig_key_algorithm = os.environ.get('DSNET_NSUPDATE_DNS_TSIG_KEY_ALGORITHM', config.dns.tsig_key_algorithm)
+    
+    config.log.level = logging.getLevelName(os.environ.get('DSNET_NSUPDATE_LOG_LEVEL', config.log.level))
+
+    logger.setLevel(config.log.level)
+
+    # Print config for troubleshooting
+    logger.debug('')
+    logger.debug('############################################################################')
+    logger.debug('Loaded configuration:')
+    logger.debug('############################################################################')
+    logger.debug('Internal DNS config:')
+    logger.debug('config.dns.internal.enabled              = ' + str(config.dns.internal.enabled))
+    logger.debug('config.dns.internal.nameserver           = ' + str(config.dns.internal.nameserver))
+    logger.debug('config.dns.internal.zone                 = ' + str(config.dns.internal.zone))
+    logger.debug('config.dns.internal.ttl                  = ' + str(config.dns.internal.ttl))
+    logger.debug('')
+    logger.debug('Reverse IPv4 DNS config:')
+    logger.debug('config.dns.internal.reverse4.enabled     = ' + str(config.dns.internal.reverse4.enabled))
+    logger.debug('config.dns.internal.reverse4.nameserver  = ' + str(config.dns.internal.reverse4.nameserver))
+    logger.debug('config.dns.internal.reverse4.zone        = ' + str(config.dns.internal.reverse4.zone))
+    logger.debug('config.dns.internal.reverse4.ttl         = ' + str(config.dns.internal.reverse4.ttl))
+    logger.debug('')
+    logger.debug('Reverse IPv6 DNS config:')
+    logger.debug('config.dns.internal.reverse6.enabled     = ' + str(config.dns.internal.reverse6.enabled))
+    logger.debug('config.dns.internal.reverse6.nameserver  = ' + str(config.dns.internal.reverse6.nameserver))
+    logger.debug('config.dns.internal.reverse6.zone        = ' + str(config.dns.internal.reverse6.zone))
+    logger.debug('config.dns.internal.reverse6.ttl         = ' + str(config.dns.internal.reverse6.ttl))
+    logger.debug('')
+    logger.debug('External DNS config:')
+    logger.debug('config.dns.external.enabled              = ' + str(config.dns.external.enabled))
+    logger.debug('config.dns.external.nameserver           = ' + str(config.dns.external.nameserver))
+    logger.debug('config.dns.external.zone                 = ' + str(config.dns.external.zone))
+    logger.debug('config.dns.external.ttl                  = ' + str(config.dns.external.ttl))
+    logger.debug('')
+    logger.debug('config.dns.current_peers_record          = ' + str(config.dns.current_peers_record))
+    logger.debug('')
+    logger.debug('config.dns.tsig_key_name                 = ' + str(config.dns.tsig_key_name))
+    logger.debug('config.dns.tsig_key_secret               = ***********')
+    logger.debug('config.dns.tsig_key_algorithm            = ' + str(config.dns.tsig_key_algorithm))
+    logger.debug('############################################################################')
+    logger.debug('')
+
+    config_error = False
+    if not config.dns.tsig_key_name:
+        logger.error("Config missing TSIG key name!")
+        config_error = True
+
+    if not config.dns.tsig_key_secret:
+        logger.error("Config missing TSIG key secret!")
+        config_error = True
+
+    if not config.dns.tsig_key_name:
+        logger.error("Config missing TSIG key algorithm!")
+        config_error = True
+
+    if config_error:
+        sys.exit(1)    
+
+    return config
+
+
+def get_peer_records(peer):
+    if config.dns.internal.enabled:
+        # IPv4
+        try:
+            # Resolve IPv4 record
+            answer4 = config.dns.internal.resolver.resolve(peer['internal']['fqdn'], 'A')
+            peer['internal']['IP'] = answer4[0].to_text()
+    
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            # Set these to None if they do not exist
+            logger.debug('No IPv4 A records for ' + peer['internal']['fqdn'])
+            peer['internal']['IP'] = None
+    
+        # IPv6
+        try:
+            # Resolve IPv6 record
+            answer6 = config.dns.internal.resolver.resolve(peer['internal']['fqdn'], 'AAAA')
+            peer['internal']['IP6'] = answer6[0].to_text()
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            # Set these to None if they do not exist
+            logger.debug('Incomplete IPv6 AAAA records for ' + peer['internal']['fqdn'])
+            peer['internal']['IP6'] = None
+
+        if config.dns.internal.reverse4.enabled:
+            if peer['internal']['IP']:
+                try:
+                    # Generate our reverse record name from the IPv4
+                    peer['internal']['reverse4'] = dns.reversename.from_address(peer['internal']['IP']).to_text()
+                    # Check it's in our reverse4 zone
+                    if peer['internal']['reverse4'].endswith(config.dns.internal.reverse4.zone):
+                        # And get what's currently in DNS
+                        answer4_ptr = config.dns.internal.reverse4.resolver.resolve_address(peer['internal']['IP'])
+                        peer['internal']['reverse4_ptr'] = answer4_ptr[0].to_text()
+        
+                    else:
+                        logger.info('peer ' + peer['internal']['fqdn'] + ' v4 not in reverse zone')
+                        peer['internal']['reverse4_ptr'] = None
+                except(dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                    # Set to None if it doesn't exist
+                    logger.debug('Incomplete IPv4 PTR records for ' + peer['internal']['fqdn'])
+                    peer['internal']['reverse4_ptr'] = None
+            else:
+                logger.debug('Incomplete IPv4 PTR records for ' + peer['internal']['fqdn'])
+                peer['internal']['reverse4'] = None
+                peer['internal']['reverse4_ptr'] = None
+        else:
+            peer['internal']['reverse4'] = None
+            peer['internal']['reverse4_ptr'] = None
+
+        if config.dns.internal.reverse6.enabled:
+            if peer['internal']['IP6']:
+                try:
+                    # Generate our reverse record name from the IPv6
+                    peer['internal']['reverse6'] = dns.reversename.from_address(peer['internal']['IP6']).to_text()
+                    # Check it's in our reverse6 zone
+                    if peer['internal']['reverse6'].endswith(config.dns.internal.reverse6.zone):
+                        # And get what's currently in DNS
+                        answer6_ptr = config.dns.internal.reverse6.resolver.resolve_address(peer['internal']['IP6'])
+                        peer['internal']['reverse6_ptr'] = answer6_ptr[0].to_text()
+        
+                    else:
+                        logger.info('peer ' + peer['internal']['fqdn'] + ' v6 not in reverse zone')
+                        peer['internal']['reverse6_ptr'] = None
+                except(dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                    # Set to None if it doesn't exist
+                    logger.debug('Incomplete IPv6 PTR records for ' + peer['internal']['fqdn'])
+                    peer['internal']['reverse6_ptr'] = None
+            else:
+                logger.debug('Incomplete IPv6 PTR records for ' + peer['internal']['fqdn'])
+                peer['internal']['reverse6'] = None
+                peer['internal']['reverse6_ptr'] = None
+        else:
+            peer['internal']['reverse6'] = None
+            peer['internal']['reverse6_ptr'] = None
+
+    else:
+        peer['internal']['IP'] = None
+        peer['internal']['IP6'] = None
+    
+
+    # External IP
+    if config.dns.external.enabled:
+        try:
+            # Resolve external IP
+            answer_ext = config.dns.external.resolver.resolve(peer['external']['fqdn'], 'A')
+            peer['external']['ExternalIP'] = answer_ext[0].to_text()
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            try:
+                answer_ext = config.dns.external.resolver.resolve(peer['external']['fqdn'], 'AAAA')
+                peer['external']['ExternalIP'] = answer_ext[0].to_text()# Set to None if it doesn't exist
+            except:
+                peer['external']['ExternalIP'] = None
+    else:
+        peer['external']['ExternalIP'] = None
+
+    return peer
+
+
+def get_peer_delegation(fqdn, dns_config):
+    try:
+        # Query the NS record
+        answer_ns = dns_config.resolver.resolve(fqdn, 'NS')
+        ns_record = answer_ns[0].to_text()
+        logger.debug(fqdn + ' has been delegated to ' + ns_record)
+        return True
+
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return False
+
+    return False
+
+
+def get_fqdn(peer, dns_config):
+
+    # Identify if the peer name supplied is a valid
+    # FQDN for the zone we are mananging
+    if peer.endswith('.' + dns_config.zone):
+        fqdn = peer
+    elif peer.endswith('.' + dns_config.zone[:-1]):
+        fqdn = peer + '.'
+    else:
+        fqdn = peer + '.' + dns_config.zone
+
+    # Check if it already exists
+    try:
+        answer = dns_config.resolver.resolve(fqdn, 'A')
+        # If the TTL is over 300, it's probably a service
+        if answer.rrset.ttl > dns_config.ttl:
+            # Add a -dsnet suffix to it to prevent spoofing
+            # Or more likely, the name is in use in a subnet
+            # thus -dsnet should be appended
+            logger.info('A record for ' + str(peer) + ' already exists in zone ' + dns_config.zone)
+            logger.info('Using ' + str(peer) + '-dsnet instead')
+            fqdn = peer.removesuffix('.' + dns_config.zone) + '-dsnet.' + dns_config.zone
+
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        # If the host doesn't exist, that's fine!
+        try:
+            answer = dns_config.resolver.resolve(fqdn, 'AAAA')
+            # If the TTL is over 300, it's probably a service
+            if answer.rrset.ttl > dns_config.ttl:
+                # Add a -dsnet suffix to it to prevent spoofing
+                # Or more likely, the name is in use in a subnet
+                # thus -dsnet should be appended
+                logger.info('AAAA record for ' + str(peer) + ' already exists in zone ' + dns_config.zone)
+                logger.info('Using ' + str(peer) + '-dsnet instead')
+                fqdn = peer.removesuffix('.' + dns_config.zone) + '-dsnet.' + dns_config.zone
+
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            # If the host doesn't exist, that's fine!
+            pass
+
+    return fqdn
+
+
+def get_current_peers(peer_txt_record):
+    # Set up our current peers dict
+    current_peers = {}
+    try:
+        # Grab the TXT record containing our current list of peers
+        peer_list = config.dns.current_peers_resolver.resolve(peer_txt_record, 'TXT')
+        for peer_entry in peer_list:
+            # For each peer in the result decode the hostname
+            peer = peer_entry.strings[0].decode()
+            # Create an entry in the dict for it
+            current_peers[peer] = {}
+
+            current_peers[peer]['internal'] = {}
+            if config.dns.internal.enabled:
+                
+                # Determine it's FQDN(s)
+                current_peers[peer]['internal']['fqdn'] = get_fqdn(peer, config.dns.internal)
+
+                # Check delegation
+                current_peers[peer]['internal']['delegated'] = get_peer_delegation(current_peers[peer]['internal']['fqdn'], config.dns.internal)
+            else:
+                current_peers[peer]['internal']['fqdn'] = None
+                current_peers[peer]['internal']['delegated'] = False
+
+            current_peers[peer]['external'] = {}
+            if config.dns.external.enabled:
+                
+                # Determine it's FQDN(s)
+                current_peers[peer]['external']['fqdn'] = get_fqdn(peer, config.dns.external)
+
+                # Check delegation
+                current_peers[peer]['external']['delegated'] = get_peer_delegation(current_peers[peer]['external']['fqdn'], config.dns.external)
+            else:
+                current_peers[peer]['external']['fqdn'] = None
+                current_peers[peer]['external']['delegated'] = False
+
+            current_peers[peer] = get_peer_records(current_peers[peer])
+
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        # If we are here, it means our TXT record doesn't exist
+        # So we have no idea what's in DNS current and it needs fixing
+        # manually. DNS is working fine, however.
+        logger.warning("No valid peers record in DNS!")
+        logger.warning("A new record will be created: " + peer_txt_record)
+
+    # If we get here, we've successfully processed all the current peers
+    # So return the dict
+    return current_peers
+
+
+def process_peer_json(json_peers):
+
+    # Sift through the peers from JSON and get the data we want
+    new_peers = {}
+    for peer_entry in json_peers:
+        # Get the peer name
+        peer = peer_entry['Hostname']
+        new_peers[peer] = {}
+        new_peers[peer]['internal'] = {}
+        if config.dns.internal.enabled:
+            # Get a safe FQDN
+            new_peers[peer]['internal']['fqdn'] = get_fqdn(peer, config.dns.internal)
+            # Set the IPv4
+            new_peers[peer]['internal']['IP'] = peer_entry['IP']
+            # Set the IPv6
+            new_peers[peer]['internal']['IP6'] = peer_entry['IP6']
+
+            if config.dns.internal.reverse4.enabled:
+                # Construct the reverse records for the peer for IPv4
+                reverse4_ptr = dns.reversename.from_address(peer_entry['IP'])
+                new_peers[peer]['internal']['reverse4'] = reverse4_ptr.to_text()
+                new_peers[peer]['internal']['reverse4_ptr'] = new_peers[peer]['internal']['fqdn']
+            else:
+                new_peers[peer]['internal']['reverse4'] = None
+                new_peers[peer]['internal']['reverse4_ptr'] = None
+
+            if config.dns.internal.reverse6.enabled:
+                # And IPv6
+                if new_peers[peer]['internal']['IP6']:
+                    # If enabled
+                    reverse6_ptr = dns.reversename.from_address(peer_entry['IP6'])
+                    new_peers[peer]['internal']['reverse6'] = reverse6_ptr.to_text()
+                    new_peers[peer]['internal']['reverse6_ptr'] = new_peers[peer]['internal']['fqdn']
+                else:
+                    # Else set to None
+                    new_peers[peer]['internal']['IP6'] = None
+                    new_peers[peer]['internal']['reverse6'] = None
+                    new_peers[peer]['internal']['reverse6_ptr'] = None
+            else:
+                new_peers[peer]['internal']['reverse6'] = None
+                new_peers[peer]['internal']['reverse6_ptr'] = None
+        else:
+            new_peers[peer]['internal']['fqdn'] = None
+            new_peers[peer]['internal']['IP'] = None
+            new_peers[peer]['internal']['IP6'] = None
+            new_peers[peer]['internal']['reverse4'] = None
+            new_peers[peer]['internal']['reverse4_ptr'] = None
+            new_peers[peer]['internal']['reverse6'] = None
+            new_peers[peer]['internal']['reverse6_ptr'] = None
+
+        new_peers[peer]['external'] = {}
+        if config.dns.external.enabled:
+            if peer_entry['Online']:
+                # Only set an external IP if the peer is online
+                new_peers[peer]['external']['fqdn'] = get_fqdn(peer, config.dns.external)
+                new_peers[peer]['external']['ExternalIP'] = peer_entry['ExternalIP']
+            else:
+                # Else set it to None
+                new_peers[peer]['external']['ExternalIP'] = None
+        else:
+            new_peers[peer]['external']['fqdn'] = None
+            new_peers[peer]['external']['ExternalIP'] = None
+
+    # Return a list of what needs to be in DNS
+    return new_peers
+
+
+def process_zones(json_data):
+    if config.dns.internal.enabled:
+        # If we're using the JSON data for our zone
+        # then pull that in
+        if config.dns.internal.zone.lower() == 'json':
+            config.dns.internal.zone = json_data['Domain']
+        # Just in case people forget...
+        if not config.dns.internal.zone.endswith('.'):
+            config.dns.internal.zone = config.dns.internal.zone + '.'
+
+        if config.dns.internal.reverse4.enabled:
+            # If we're using the JSON data for our zone
+            # then pull that in
+            if config.dns.internal.reverse4.zone.lower() == 'json':
+                # Split out our network and our mask
+                network4, mask4 = tuple(json_data['Network'].split('/'))
+                # Convert network to PTR zone
+                reverse4 = dns.reversename.from_address(network4).to_text()
+                # Calculate the number of octets we should have in the PTR zone
+                octets4 = int(int(mask4)/8)
+                # Remove excess octets
+                config.dns.internal.reverse4.zone = '.'.join(reverse4.split('.')[4-octets4:])
+    
+            if not config.dns.internal.reverse4.zone.endswith('.'):
+                config.dns.internal.reverse4.zone = config.dns.internal.reverse4.zone + '.'
+    
+        if config.dns.internal.reverse6.enabled:
+            # If we're using the JSON data for our zone
+            # then pull that in
+            if config.dns.internal.reverse6.zone.lower() == 'json':
+                # Split out our network and our mask
+                network6, mask6 = tuple(json_data['Network6'].split('/'))
+                # Convert network to PTR zone
+                reverse6 = dns.reversename.from_address(network6).to_text()
+                # Calculate the number of hex characters we should have in the PTR zone
+                octets6 = int(int(mask6)/4)
+                # Remove excess octets
+                config.dns.internal.reverse6.zone = '.'.join(reverse6.split('.')[32-octets6:])
+    
+            if not config.dns.internal.reverse6.zone.endswith('.'):
+                config.dns.internal.reverse6.zone = config.dns.internal.reverse6.zone + '.'
+
+    if config.dns.external.enabled:
+        # If we're using the JSON data for our zone
+        # then pull that in
+        if config.dns.external.zone.lower() == 'json':
+            config.dns.external.zone = json_data['Domain']
+        # Just in case people forget...
+        if not config.dns.external.zone.endswith('.'):
+            config.dns.external.zone = config.dns.external.zone + '.'
+
+
+def process_resolvers(json_data):
+    if config.dns.internal.enabled:
+        if config.dns.internal.nameserver.lower() == 'json':
+            config.dns.internal.nameserver = json_data['DNS']
+
+        logger.debug('Using internal DNS zone: ' + config.dns.internal.zone)
+        logger.debug('Using internal nameserver: ' + config.dns.internal.nameserver)
+        config.dns.internal.resolver.nameservers = [config.dns.internal.nameserver]
+
+        config.dns.current_peers_record_zone = config.dns.internal.zone
+        config.dns.current_peers_record_fqdn = config.dns.current_peers_record + '.' + config.dns.current_peers_record_zone
+        config.dns.current_peers_record_ttl = config.dns.internal.ttl
+        logger.debug('Using peers TXT record: ' + config.dns.current_peers_record_fqdn)
+        config.dns.current_peers_resolver = config.dns.internal.resolver
+
+        if config.dns.internal.reverse4.enabled:
+            if not config.dns.internal.reverse4.nameserver:
+                config.dns.internal.reverse4.nameserver = config.dns.internal.nameserver
+
+            if config.dns.internal.reverse4.nameserver.lower() == 'json':
+                config.dns.internal.reverse4.nameserver = json_data['DNS']
+    
+            logger.debug('Using DNS IPv4 reverse zone: ' + config.dns.internal.reverse4.zone)
+            logger.debug('Using IPv4 reverse nameserver: ' + config.dns.internal.reverse4.nameserver)
+            config.dns.internal.reverse4.resolver.nameservers = [config.dns.internal.reverse4.nameserver]
+    
+        if config.dns.internal.reverse6.enabled:
+            if not config.dns.internal.reverse6.nameserver:
+                config.dns.internal.reverse6.nameserver = config.dns.internal.nameserver
+
+            if config.dns.internal.reverse6.nameserver.lower() == 'json':
+                config.dns.internal.reverse6.nameserver = json_data['DNS']
+    
+            logger.debug('Using DNS IPv6 reverse zone: ' + config.dns.internal.reverse6.zone)
+            logger.debug('Using IPv6 reverse nameserver: ' + config.dns.internal.reverse6.nameserver)
+            config.dns.internal.reverse6.resolver.nameservers = [config.dns.internal.reverse6.nameserver]
+
+    if config.dns.external.enabled:
+        if config.dns.external.nameserver.lower() == 'json':
+            config.dns.external.nameserver = json_data['ExternalIP']
+
+        logger.debug('Using external DNS zone: ' + config.dns.external.zone)
+        logger.debug('Using external nameserver: ' + config.dns.external.nameserver)
+        config.dns.external.resolver.nameservers = [config.dns.external.nameserver]
+
+        if not config.dns.current_peers_record_fqdn:
+            config.dns.current_peers_record_zone = config.dns.external.zone
+            config.dns.current_peers_record_fqdn = config.dns.current_peers_record + '.' + config.dns.current_peers_record_zone
+            config.dns.current_peers_record_ttl = config.dns.external.ttl
+            logger.debug('Using peers TXT record: ' + config.dns.current_peers_record_fqdn)
+            config.dns.current_peers_resolver = config.dns.external.resolver
+
+
+def main():
+
+    global config
+
+    logger.info('Starting dsnet-nsupdate')
+
+    # Build the configuration from YAML file and environment variables if present
+    if len(sys.argv) >= 2:
+        config_source = 'CONFIG_FILE_ARG'
+    else:
+        config_source = os.environ.get('DSNET_NSUPDATE_CONFIG_SOURCE', 'CONFIG_FILE')
+
+    if not config_source == "CONFIG_FILE_ARG" and not config_source == "CONFIG_FILE" and not config_source == "ENVIRONMENT":
+        logger.error("Invalid configuration source specified in environment variable ")
+        logger.error("DSNET_NSUPDATE_CONFIG_SOURCE = " + config_source)
+        sys.exit(1)
+
+    config = build_conf(config_source)
+
+    logger.info('Loading dsnetreport.json from ' + config.report.file)
+    if not os.path.exists(config.report.file):
+        logger.error('Report file does not exist!')
+        sys.exit(1)
+
+    with open(config.report.file) as report_file:
+        # Open and load that JSON file
+        dsnet_report_json = json.load(report_file)
+
+    process_zones(dsnet_report_json)
+    process_resolvers(dsnet_report_json)
+
+    # Check we have a zone to update first
+    if not config.dns.current_peers_record_fqdn:
+        logger.info('No internal or external zones have been enabled in configuration!')
+        logger.info('Exiting...')
+        sys.exit(0)
+
+    # Get a list of what's currently in DNS
+    current_peers = get_current_peers(config.dns.current_peers_record_fqdn)
+
+    # Print some debug info about current peers
+    logger.debug("Current peers:")
+    for line in pformat(current_peers).splitlines():
+        logger.debug(line)
+
+    # Work out what needs to be in DNS
+    new_peers = process_peer_json(dsnet_report_json['Peers'])
+
+    # Print some debug info
+    logger.debug("New peers:")
+    for line in pformat(new_peers).splitlines():
+        logger.debug(line)
+
+    # Set up some lists for what we're changing
+    add_peers = []
+    update_internal4_peers = []
+    update_internal6_peers = []
+    update_reverse4_peers = []
+    update_reverse6_peers = []
+    update_external_peers = []
+    delete_peers = []
+
+    # What do we delete?
+    for peer in current_peers:
+        # If the peer is in current_peers but not new_peers
+        # it has been deleted
+        if peer not in new_peers:
+            # Add it to the list
+            delete_peers.append(peer)
+
+    # What do we add?
+    for peer in new_peers:
+        # If the peer is in new_peers but not current_peers, it is new
+        if peer not in current_peers:
+            # Add it to the list
+            add_peers.append(peer)
+        else:
+            # What do we update?
+            # Internally first
+            # Check if this peer is delegated to it's own DNS first
+            if not current_peers[peer]['internal']['delegated']:
+                # Check internal IPv4
+                if new_peers[peer]['internal']['IP'] != current_peers[peer]['internal']['IP']:
+                    # Update if the internal IPv4 doesn't match
+                    update_internal4_peers.append(peer)
+                # Check internal IPv6
+                if new_peers[peer]['internal']['IP6'] != current_peers[peer]['internal']['IP6']:
+                    # Update if the internal IPv4 doesn't match
+                    update_internal6_peers.append(peer)
+
+            # Check reverse IPv4 record
+            if new_peers[peer]['internal']['reverse4_ptr'] != current_peers[peer]['internal']['reverse4_ptr']:
+                # Update if the PTR records don't match
+                # Check if it's in our IPv4 reverse zone
+                if new_peers[peer]['internal']['reverse4'].endswith(config.dns.internal.reverse4.zone):
+                    update_reverse4_peers.append(peer)
+                else:
+                    logger.warning(peer + " internal IPv4 not in reverse zone!")
+
+            # Check reverse IPv6 record
+            if new_peers[peer]['internal']['reverse6_ptr'] != current_peers[peer]['internal']['reverse6_ptr']:
+                # Update if the PTR records don't match
+                # Check if it's in our IPv6 reverse zone
+                if new_peers[peer]['internal']['reverse6'].endswith(config.dns.internal.reverse6.zone):
+                    update_reverse6_peers.append(peer)
+                else:
+                   logger.warning(peer + " internal IPv6 not in reverse zone!")
+
+            # Check if this peer is delegated to it's own DNS first
+            if not current_peers[peer]['external']['delegated']:
+                # Check external IP
+                if new_peers[peer]['external']['ExternalIP'] != current_peers[peer]['external']['ExternalIP']:
+                    # Update if the external IP doesn't match
+                    update_external_peers.append(peer)
+
+    # List peers we're adding
+    if add_peers:
+        logger.info("Adding peers:")
+        for peer in add_peers:
+            logger.info("  " + peer)
+            for line in pformat(new_peers[peer]).splitlines():
+                logger.debug(line)
+
+    if config.dns.internal.enabled:
+        # List peers we're updating the internal IPv4 of
+        if update_internal4_peers:
+            logger.info("Updating internal IPv4 peers:")
+            for peer in update_internal4_peers:
+                logger.info("  " + peer)
+                logger.debug("    " + new_peers[peer]['internal']['fqdn'] + " " + str(new_peers[peer]['internal']['IP']))
+
+        # List peers we're updating the internal IPv6 of
+        if update_internal6_peers:
+            logger.info("Updating internal IPv6 peers:")
+            for peer in update_internal6_peers:
+                logger.info("  " + peer)
+                logger.debug("    " + new_peers[peer]['internal']['fqdn'] + " " + str(new_peers[peer]['internal']['IP6']))
+
+        if config.dns.internal.reverse4.enabled:
+            # List peers we're updating the reverse IPv4 of
+            if update_reverse4_peers:
+                logger.info("Updating IPv4 reverse peers:")
+                for peer in update_reverse4_peers:
+                    logger.info("  " + peer)
+                    logger.debug("    " + new_peers[peer]['internal']['reverse4'] + " " + str(new_peers[peer]['internal']['reverse4_ptr']))
+
+        if config.dns.internal.reverse6.enabled:
+            # List peers we're updating the reverse IPv6 of
+            if update_reverse6_peers:
+                logger.info("Updating IPv6 reverse peers:")
+                for peer in update_reverse6_peers:
+                    logger.info("  " + peer)
+                    logger.debug("    " + new_peers[peer]['internal']['reverse6'] + " " + str(new_peers[peer]['internal']['reverse6_ptr']))
+
+    if config.dns.external.enabled:
+        # List peers we're updating the external IP of
+        if update_external_peers:
+            logger.info("Updating external peers:")
+            for peer in update_external_peers:
+                logger.info("  " + peer)
+                logger.debug("    " + new_peers[peer]['external']['fqdn'] + " " + str(new_peers[peer]['external']['ExternalIP']))
+
+    # List peers we're deleting
+    if delete_peers:
+        logger.info("Deleting peers:")
+        for peer in delete_peers:
+            logger.info("  " + peer)
+            for line in pformat(current_peers[peer]).splitlines():
+                logger.debug(line)
+
+    # If there's nothing in any of these lists,
+    # we don't need to do anything!
+    if not add_peers and not delete_peers:
+        if not update_int_peers and not update_int6_peers:
+            if not update_ptr_peers and not update_ptr6_peers:
+                if config.dns.external.enabled:
+                    if not update_ext_peers:
+                        logger.info("Nothing to do! Exiting...")
+                        sys.exit(0)
+                else:
+                    logger.info("Nothing to do! Exiting...")
+                    sys.exit(0)
+
+    # Load the TSIG key from file
+    dns_update_key = {}
+    dns_update_key[config.dns.tsig_key_name] = config.dns.tsig_key_secret
+
+    # Add it to the keyring
+    dns_keyring = dns.tsigkeyring.from_text(dns_update_key)
+
+    # Separate peer record update
+    update_peer_record = dns.update.Update(config.dns.current_peers_record_zone, keyring=dns_keyring, keyalgorithm=config.dns.tsig_key_algorithm)
+
+    # Set up the update entries for each zone
+    update_internal = dns.update.Update(config.dns.internal.zone, keyring=dns_keyring, keyalgorithm=config.dns.tsig_key_algorithm)
+    update_reverse4 = dns.update.Update(config.dns.internal.reverse4.zone, keyring=dns_keyring, keyalgorithm=config.dns.tsig_key_algorithm)
+    update_reverse6 = dns.update.Update(config.dns.internal.reverse6.zone, keyring=dns_keyring, keyalgorithm=config.dns.tsig_key_algorithm)
+    update_external = dns.update.Update(config.dns.external.zone, keyring=dns_keyring, keyalgorithm=config.dns.tsig_key_algorithm)
+
+    # Manage the TXT record first
+    # Only change the TXT records we are adding
+    for peer in add_peers:
+        # Add the TXT record for the peer
+        update_peer_record.add(config.dns.current_peers_record_fqdn, config.dns.internal.ttl, 'TXT', peer)
+    # Or deleting
+    for peer in delete_peers:
+        # Construct an rdata object so we can delete a SPECIFIC record
+        datatype = dns.rdatatype.from_text('TXT')
+        rdata = dns.rdata.from_text(dns.rdataclass.IN, datatype, peer)
+        update_peer_record.delete(config.dns.current_peers_record_fqdn, rdata)
+
+    # For new peers
+    for peer in add_peers:
+        if config.dns.internal.enabled:
+            # Add the A record and reverse
+            if new_peers[peer]['internal']['fqdn'].endswith(config.dns.internal.zone):
+                update_internal.replace(new_peers[peer]['internal']['fqdn'], config.dns.internal.ttl,
+                                   'A', new_peers[peer]['internal']['IP'])
+                # Add the AAAA record if there is an IPv6
+                if new_peers[peer]['internal']['IP6']:
+                    update_internal.replace(new_peers[peer]['internal']['fqdn'], config.dns.internal.ttl,
+                                       'AAAA', new_peers[peer]['internal']['IP6'])
+            else:
+                logger.warning(peer + ' FQDN: ' + new_peers[peer]['internal']['fqdn'] + ' Not in ' +
+                               'internal DNS zone: ' + config.dns.internal.zone)
+
+            # Add the IPv4 reverse record if enabled
+            if config.dns.internal.reverse4.enabled:
+                if new_peers[peer]['internal']['reverse4'].endswith(config.dns.internal.reverse4.zone):
+                    update_reverse4.replace(new_peers[peer]['internal']['reverse4'], config.dns.internal.reverse4.ttl,
+                                            'PTR', new_peers[peer]['internal']['fqdn'])
+                else:
+                    logger.warning(peer + ' internal IPv4: ' + new_peers[peer]['internal']['IP'] + ' Not in ' +
+                                   'reverse zone ' + config.dns.internal.reverse4.zone)
+
+            # Add the IPv6 reverse record if enabled
+            if config.dns.internal.reverse6.enabled:
+                if new_peers[peer]['internal']['reverse6'].endswith(config.dns.internal.reverse6.zone):
+                    update_reverse6.replace(new_peers[peer]['internal']['reverse6'], config.dns.internal.reverse6.ttl,
+                                            'PTR', new_peers[peer]['internal']['fqdn'])
+                else:
+                    logger.warning(peer + ' internal IPv6: ' + new_peers[peer]['internal']['IP6'] + ' Not in ' +
+                                   'reverse zone ' + config.dns.internal.reverse6.zone)
+
+        if config.dns.external.enabled:
+            # An external IP if present
+            if new_peers[peer]['external']['ExternalIP']:
+                try:
+                    socket.inet_pton(socket.AF_INET, new_peers[peer]['external']['ExternalIP'])
+                    update_external.replace(new_peers[peer]['external']['fqdn'], config.dns.external.ttl,
+                                       'A', new_peers[peer]['external']['ExternalIP'])
+                except socket.error:
+                    try:
+                        socket.inet_pton(socket.AF_INET6, new_peers[peer]['external']['ExternalIP'])
+                        update_external.replace(new_peers[peer]['external']['fqdn'], config.dns.external.ttl,
+                                           'AAAA', new_peers[peer]['external']['ExternalIP'])
+                    except socket.error:
+                        logger.error('Invalid external IP for peer ' + peer)
+
+    # Update IPv4 records as needed
+    for peer in update_internal4_peers:
+        # Update if present
+        if new_peers[peer]['internal']['IP']:
+            if new_peers[peer]['internal']['fqdn'].endswith(config.dns.internal.zone):
+                update_internal.replace(new_peers[peer]['internal']['fqdn'], config.dns.internal.ttl,
+                                   'A', new_peers[peer]['internal']['IP'])
+            else:
+                logger.warning(peer + ' FQDN: ' + new_peers[peer]['internal']['fqdn'] + ' Not in ' +
+                               'internal DNS zone: ' + config.dns.internal.zone)
+        # Delete if removed for some reason
+        else:
+            update_internal.delete(current_peers[peer]['internal']['fqdn'], 'A')
+
+
+    # Update IPv6 records as needed
+    for peer in update_internal6_peers:
+        if new_peers[peer]['internal']['fqdn'].endswith(config.dns.internal.zone):
+        # Update if present
+            if new_peers[peer]['internal']['IP6']:
+                update_internal.replace(new_peers[peer]['internal']['fqdn'], config.dns.internal.ttl,
+                                   'AAAA', new_peers[peer]['internal']['IP6'])
+            # Delete if removed for some reason
+            else:
+                update_internal.delete(current_peers[peer]['internal']['fqdn']['internal'], 'AAAA')
+        else:
+            logger.warning(peer + ' FQDN: ' + new_peers[peer]['internal']['fqdn'] + ' Not in ' +
+                           'internal DNS zone: ' + config.dns.internal.zone)
+
+    if config.dns.external.enabled:
+        # Update external IPs if needed
+        for peer in update_external_peers:
+            # Update if present
+            if new_peers[peer]['external']['ExternalIP']:
+                update_external.replace(new_peers[peer]['external']['fqdn'], config.dns.external.ttl,
+                                   'A', new_peers[peer]['external']['ExternalIP'])
+            # Delete if host has disconnected
+            else:
+                update_external.delete(current_peers[peer]['external']['fqdn'], 'A')
+
+    # Update reverse IPv4 reconds as needed
+    for peer in update_reverse4_peers:
+        # Update if present
+        if new_peers[peer]['internal']['reverse4']:
+            update_reverse4.replace(new_peers[peer]['internal']['reverse4'], config.dns.internal.reverse4.ttl,
+                                   'PTR', new_peers[peer]['internal']['fqdn'])
+        # Delete if removed for some reason
+        else:
+            update_reverse4.delete(current_peers[peer]['internal']['reverse4'], 'PTR')
+
+    # Update reverse IPv6 reconds as needed
+    for peer in update_reverse6_peers:
+        # Update if present
+        if new_peers[peer]['internal']['reverse6']:
+            update_reverse6.replace(new_peers[peer]['internal']['reverse6'], config.dns.internal.reverse6.ttl,
+                                    'PTR', new_peers[peer]['internal']['fqdn'])
+        # Delete if removed for some reason
+        else:
+            update_reverse6.delete(current_peers[peer]['internal']['reverse6'], 'PTR')
+
+    # For deleted peers
+    for peer in delete_peers:
+        # Delete the forward records
+        if current_peers[peer]['internal']['fqdn'].endswith(config.dns.internal.zone):
+            update_internal.delete(current_peers[peer]['internal']['fqdn'], 'A')
+            update_internal.delete(current_peers[peer]['internal']['fqdn'], 'AAAA')
+            # Delete the reverse records
+            if current_peers[peer]['internal']['reverse4'].endswith(config.dns.internal.reverse4.zone):
+                update_reverse4.delete(current_peers[peer]['internal']['reverse4'], 'PTR')
+            if current_peers[peer]['internal']['reverse4'].endswith(config.dns.internal.reverse6.zone):
+                update_reverse6.delete(current_peers[peer]['internal']['reverse6'], 'PTR')
+
+        # Delete the external IP record if it exists
+        if current_peers[peer]['external']['ExternalIP'] and current_peers[peer]['external']['fqdn'].endswith(config.dns.external.zone):
+            update_external.delete(current_peers[peer]['external']['fqdn'], 'A')
+
+    try:
+        # Send the updates to the DNS servers, via TCP because they are LONG
+
+        # Internal forward zone
+        for line in pformat(update_peer_record).splitlines():
+            logger.debug(line)
+        #response = dns.query.tcp(update_int, dsnet_int_nameserver, timeout=10)
+
+        if config.dns.internal.enabled:
+            # Internal forward zone
+            logger.debug('Internal zone update: ')
+            for line in update_internal.to_text().splitlines():
+                logger.debug('  ' + line)
+                #response = dns.query.tcp(update_internal, dsnet_int_nameserver, timeout=10)
+
+            if config.dns.internal.reverse4.enabled:
+                # IPv4 reverse zone
+                logger.debug('Reverse IPv4 zone update: ')
+                for line in update_reverse4.to_text().splitlines():
+                    logger.debug('  ' + line)
+                #response = dns.query.tcp(update_reverse, dsnet_int_nameserver, timeout=10)
+
+            if config.dns.internal.reverse6.enabled:
+                # IPv6 reverse zone
+                logger.debug('Reverse IPv6 zone update: ')
+                for line in update_reverse6.to_text().splitlines():
+                    logger.debug('  ' + line)
+                #response = dns.query.tcp(update_reverse6, dsnet_int_nameserver, timeout=10)
+
+        if config.dns.external.enabled:
+            # External forward zone
+            logger.debug('External zone update: ')
+            for line in update_external.to_text().splitlines():
+                logger.debug('  ' + line)
+            response = dns.query.tcp(update_external, config.dns.external.nameserver, timeout=10)
+
+
+    except dns.tsig.PeerBadKey:
+        # Warn if we get a TSIG key error
+        logger.error("TSIG key failure on update!")
+        sys.exit(1)
+
+    # All done!
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

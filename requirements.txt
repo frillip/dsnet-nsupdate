@@ -1,0 +1,4 @@
+dnspython
+colorlog
+pyyaml
+pprint

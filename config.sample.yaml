@@ -1,0 +1,118 @@
+dsnet-nsupdate:
+  report:
+    # Location for the dsnetreport.json file
+    # This is the output of the command `dsnet report`
+    # Defaults to '/var/lib/dsnetreport.json'
+    #file: /var/lib/dsnetreport.json
+
+  dns:
+    internal:
+      # Enable updates to the internal forward zone
+      # Defaults to 'false'
+      enabled: true
+
+      # You can specify a name server here
+      #nameserver: 10.164.236.1
+      # Or use 'json' to use the 'DNS' key in dsnetreport.json
+      # If nothing is specified it will default to 'json'
+      #nameserver: json
+
+      # You can specify a DNS zone here (note trailing '.')
+      #zone example.com.
+      # Or use 'json' to use the 'Domain' key in dsnetreport.json
+      # If nothing is specified it will default to 'json'
+      #zone: json
+
+      # TTL can be specified per zone, if unspecified it will default to 300
+      #ttl: 300
+
+      reverse4:
+        # Enable updates to the internal reverse IPv4 zone
+        # Internal zone above MUST be enabled for this to work
+        # as otherwise there will be no data to go in the PTR records
+        # Defaults to 'false'
+        enabled: true
+
+        # You can specify a name server here
+        #nameserver: 10.164.236.1
+        # Or use 'json' to use the 'DNS' key in dsnetreport.json
+        # If nothing is specified it will default to 'json'
+        #nameserver: json
+
+        # You can specify a DNS zone here (note trailing '.')
+        #zone 18.172.in-addr.arpa.
+        # Or use 'json' and dsnet-nsupdate will attempt to use
+        # the 'Network' key in dsnetreport.json to derive a reverse zone
+        # If nothing is specified it will default to 'json'
+        #zone: json
+
+        # TTL can be specified per zone, if unspecified it will default to
+        # what is set for the internal zone
+        #ttl: 300
+
+      reverse6:
+        # Enable updates to the internal reverse IPv6 zone
+        # Internal zone above MUST be enabled for this to work
+        # as otherwise there will be no data to go in the PTR records
+        # Defaults to 'false'
+        enabled: true
+        
+        # You can specify a name server here
+        #nameserver: 10.164.236.1
+        # Or use 'json' to use the 'DNS' key in dsnetreport.json
+        # If nothing is specified it will default to 'json'
+        #nameserver: json
+
+        # You can specify a DNS zone here (note trailing '.')
+        #zone 0.0.e.a.a.6.0.1.1.3.b.7.0.0.d.f.ip6.arpa.
+        # Or use 'json' and dsnet-nsupdate will attempt to use
+        # the 'Network6' key in dsnetreport.json to derive a reverse zone
+        # If nothing is specified it will default to 'json'
+        #zone: json
+
+        # TTL can be specified per zone, if unspecified it will default to
+        # what is set for the internal zone
+        #ttl: 300
+
+    external:
+      # Enable updates to the external forward zone
+      # Defaults to 'false'
+      enabled: true
+
+      # You can specify a name server here
+      #nameserver: 198.51.100.2
+      # Or use 'json' to use the 'ExternalIP' key in dsnetreport.json
+      # If nothing is specified it will default to 'json'
+      #nameserver: json
+
+      # You can specify a DNS zone here (note trailing '.')
+      #zone example.com.
+      # Or use 'json' to use the 'Domain' key in dsnetreport.json
+      # If nothing is specified it will default to 'json'
+      #zone: json
+
+      # TTL can be specified per zone, if unspecified it will default to 300
+      #ttl: 300
+
+    # This is the name of the TXT record that will keep track of
+    # current peer data in DNS
+    # Defaults to '_dsnet_peers'
+    current_peers_record: _dsnet_peers
+
+    # Enter the details for your DNS TSIG keys here
+    # These are not optional and must either be specified here
+    # or via environment variables
+    tsig_key_name: example_key_name
+    tsig_key_secret: aHR0cHM6Ly93d3cueW91dHViZS5jb20vd2F0Y2g/dj1vSGc1U0pZUkhBMA==
+    tsig_key_algorithm: hmac-sha256
+
+  log:
+    # Logging level
+    # Can be one of the standard python logging levels:
+    # - CRITICAL
+    # - ERROR
+    # - WARNING
+    # - INFO
+    # - DEBUG
+    # Defaults to 'INFO'
+    level: INFO
