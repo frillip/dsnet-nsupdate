@@ -1,9 +1,10 @@
 # dsnet-nsupdate
 
-A script to maintain an up-to-date DNS zone based on `dsnetreport.json`. It does this by comparing what is currently in DNS (aided by creating a list of peers in a TXT record in the DNS zone), compared with what needs to be in DNS based on `dsnetreport.json`. It supports both forward and reverse records for IPv4 and IPv6, and can also update an external nameserver in a split-horizon configuration.
+A script to maintain an up-to-date DNS zone based on a dsnet centralised wireguard VPN. It does this by comparing what is currently in DNS (aided by creating a list of peers in a TXT record in the DNS zone), compared with what needs to be in DNS based on the output of `dsnet report`, `dsnetreport.json`. It supports both forward and reverse records for IPv4 and IPv6, and can also update an external nameserver in a split-horizon configuration.
 
 ## Requirements
 A working BIND configuration that allows dynamic updates with TSIG keys
+
 See also: `requirements.txt`
 
 ## Background
@@ -18,8 +19,10 @@ The majority of data is obtained from `dsnetreport.json`, but can be overridden 
 
 The only information that has no defaults and MUST be given are the DNS TSIG keys.
 
-### Configuration
+## Configuration
+
+TO BE ADDED
 
 | YAML key | Description | Optional | Default | Environment variable |
 | :--- | :--- | :--- | :--- | :--- |
-TO BE AADDED
+
