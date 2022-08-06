@@ -153,6 +153,7 @@ class ConfigFile:
             self.current_peers_record = "_dsnet_peers"
             self.current_peers_record_zone = None
             self.current_peers_record_fqdn = None
+            self.current_peers_record_nameserver = None
             self.current_peers_record_ttl = None
             self.current_peers_resolver = None
 
@@ -599,6 +600,7 @@ def process_resolvers(json_data):
 
         config.dns.current_peers_record_zone = config.dns.internal.zone
         config.dns.current_peers_record_fqdn = config.dns.current_peers_record + '.' + config.dns.current_peers_record_zone
+        config.dns.current_peers_record_nameserver = config.dns.internal.nameserver
         config.dns.current_peers_record_ttl = config.dns.internal.ttl
         logger.debug('Using peers TXT record: ' + config.dns.current_peers_record_fqdn)
         config.dns.current_peers_resolver = config.dns.internal.resolver
@@ -636,6 +638,7 @@ def process_resolvers(json_data):
         if not config.dns.current_peers_record_fqdn:
             config.dns.current_peers_record_zone = config.dns.external.zone
             config.dns.current_peers_record_fqdn = config.dns.current_peers_record + '.' + config.dns.current_peers_record_zone
+            config.dns.current_peers_record_nameserver = config.dns.external.nameserver
             config.dns.current_peers_record_ttl = config.dns.external.ttl
             logger.debug('Using peers TXT record: ' + config.dns.current_peers_record_fqdn)
             config.dns.current_peers_resolver = config.dns.external.resolver
@@ -979,31 +982,31 @@ def main():
     try:
         # Send the updates to the DNS servers, via TCP because they are LONG
 
-        # Internal forward zone
+        # Peer TXT record
         for line in pformat(update_peer_record).splitlines():
             logger.debug(line)
-        #response = dns.query.tcp(update_int, dsnet_int_nameserver, timeout=10)
+        response = dns.query.tcp(update_peer_record, config.dns.current_peers_record_nameserver, timeout=10)
 
         if config.dns.internal.enabled:
             # Internal forward zone
             logger.debug('Internal zone update: ')
             for line in update_internal.to_text().splitlines():
                 logger.debug('  ' + line)
-                #response = dns.query.tcp(update_internal, dsnet_int_nameserver, timeout=10)
+                response = dns.query.tcp(update_internal, config.dns.internal.reverse4.nameserver, timeout=10)
 
             if config.dns.internal.reverse4.enabled:
                 # IPv4 reverse zone
                 logger.debug('Reverse IPv4 zone update: ')
                 for line in update_reverse4.to_text().splitlines():
                     logger.debug('  ' + line)
-                #response = dns.query.tcp(update_reverse, dsnet_int_nameserver, timeout=10)
+                response = dns.query.tcp(update_reverse, config.dns.internal.reverse4.nameserver, timeout=10)
 
             if config.dns.internal.reverse6.enabled:
                 # IPv6 reverse zone
                 logger.debug('Reverse IPv6 zone update: ')
                 for line in update_reverse6.to_text().splitlines():
                     logger.debug('  ' + line)
-                #response = dns.query.tcp(update_reverse6, dsnet_int_nameserver, timeout=10)
+                response = dns.query.tcp(update_reverse6, config.dns.internal.reverse4.nameserver, timeout=10)
 
         if config.dns.external.enabled:
             # External forward zone
